@@ -2,14 +2,28 @@ const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const { initializeFirebaseApp, getAllStations } = require("./firebase");
+const { OpenAI } = require("openai");
+const { Client } = require("@googlemaps/google-maps-services-js");
+
+import {
+    Document,
+    storageContextFromDefaults,
+    VectorStoreIndex,
+    SummaryIndex,
+    SimpleDocumentStore,
+    serviceContextFromDefaults,
+    SummaryRetrieverMode,
+    SimpleNodeParser
+
+} from "llamaindex";
 
 require('dotenv').config();
-
-const { OpenAI } = require("openai");
 
 const openai = new OpenAI({
   apiKey: process.env.CHATGPT_API_KEY 
 });
+
+const googleMapsClient = new Client({});
 
 const app = express();
 app.use(bodyParser.json());
@@ -22,7 +36,39 @@ app.post("/chat", async (req, res) => {
     const body = req.body;
     let prompt = body.prompt;
     let warehouseList = await getAllStations();
-    console.log(prompt);
+
+    const args = {
+        params: {
+            key: process.env.GOOGLE_MAPS_API_KEY,
+            address: body.address
+        }
+    }
+
+    let documents = [];
+    for(let i = 0; i < warehouseList.length; i++){
+        let current = warehouseList[i];
+        let warehouseMetadata = `This warehouse's name is ${current.Name}. Its regular gas price today is ${current.Regular_Gas}, premium gas price today
+        is ${current.Premium_Gas}. Its address is ${current.Address}, ${current.City}, ${current.State}`;
+        let document = new Document({text: warehouseMetadata, id_: i.toString()});
+        documents.push(document);
+    }
+    const storageContext = await storageContextFromDefaults({
+        persistDir: "./storage",
+    });
+    const index = await VectorStoreIndex.fromDocuments(documents, {
+        storageContext,
+    });
+    const secondStorageContext = await storageContextFromDefaults({
+        persistDir: "./storage",
+    });
+    // const loadedIndex = await SummaryIndex.init({
+    //     storageContext: secondStorageContext,
+    // });
+    const loadedQueryEngine = index.asQueryEngine();
+    const loadedResponse = await loadedQueryEngine.query({
+        query: "Name all 16 of the Costco warehouses",
+    });
+    console.log(loadedResponse.toString());
 
     let checkMessageType = `Given the following prompt: ${prompt}, please assign it a value to the type of request
     it is the closest to. Here are the values: 1 is finding the nearest cheapest gas station, 2 is finding the
@@ -34,9 +80,9 @@ app.post("/chat", async (req, res) => {
         model: "gpt-3.5-turbo",
         messages: [{"role": "user", "content": checkMessageType}],
     });
-    console.log(chatCompletion.choices[0].message.content);
+
+    let messageContent;
     let messageType = parseInt(JSON.parse(chatCompletion.choices[0].message.content).Message_Type);
-    console.log(messageType);
     if(messageType == 4){
         let errorResponse = {"error": "Invalid Request"};
         res.send(errorResponse);
@@ -78,7 +124,6 @@ app.post("/chat", async (req, res) => {
             model: "gpt-3.5-turbo",
             messages: [{"role": "user", "content": messageContent}],
         });
-        console.log(chatCompletion.choices[0].message.content);
         res.send(chatCompletion.choices[0].message.content);    
     }
 
